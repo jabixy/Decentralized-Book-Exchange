@@ -5,6 +5,8 @@
 (define-constant ERR-INVALID-STATUS (err u422))
 (define-constant ERR-EXPIRED (err u410))
 (define-constant ERR-INSUFFICIENT-FUNDS (err u402))
+(define-constant ERR-INVALID-RATING (err u411))
+(define-constant ERR-PREFERENCE-EXISTS (err u412))
 
 (define-constant CONTRACT-OWNER tx-sender)
 (define-constant PLATFORM-FEE u100)
@@ -14,6 +16,7 @@
 (define-data-var next-book-id uint u1)
 (define-data-var next-trade-id uint u1)
 (define-data-var platform-earnings uint u0)
+(define-data-var next-review-id uint u1)
 
 (define-map books 
   uint 
@@ -26,7 +29,8 @@
     trade-type: (string-ascii 10),
     price: uint,
     available: bool,
-    created-at: uint
+    created-at: uint,
+    genre: (string-ascii 30)
   }
 )
 
@@ -58,13 +62,59 @@
   uint
 )
 
+(define-map user-preferences
+  principal
+  {
+    favorite-genres: (list 10 (string-ascii 30)),
+    favorite-authors: (list 10 (string-ascii 50)),
+    reading-level: (string-ascii 20),
+    preferred-conditions: (list 5 (string-ascii 20)),
+    max-price: uint,
+    updated-at: uint
+  }
+)
+
+(define-map book-reviews
+  uint
+  {
+    book-id: uint,
+    reviewer: principal,
+    rating: uint,
+    review-text: (string-ascii 500),
+    helpful-votes: uint,
+    created-at: uint,
+    verified-trade: bool
+  }
+)
+
+(define-map reading-history
+  {user: principal, book-id: uint}
+  {
+    completed: bool,
+    rating: uint,
+    read-date: uint,
+    trade-id: uint
+  }
+)
+
+(define-map genre-popularity
+  (string-ascii 30)
+  {
+    total-trades: uint,
+    total-ratings: uint,
+    average-rating: uint
+  }
+)
+
 (define-public (list-book 
   (title (string-ascii 100))
   (author (string-ascii 50))
   (isbn (string-ascii 20))
   (condition (string-ascii 20))
   (trade-type (string-ascii 10))
-  (price uint))
+  (price uint)
+  (genre (string-ascii 30))
+)
   (let ((book-id (var-get next-book-id)))
     (asserts! (or (is-eq trade-type "lend") (is-eq trade-type "sell")) ERR-INVALID-STATUS)
     (asserts! (> price u0) ERR-INVALID-AMOUNT)
@@ -77,7 +127,8 @@
       trade-type: trade-type,
       price: price,
       available: true,
-      created-at: stacks-block-height
+      created-at: stacks-block-height,
+      genre: genre
     })
     (var-set next-book-id (+ book-id u1))
     (ok book-id)
@@ -307,5 +358,132 @@
             (is-eq (get status trade) "active")
             (> stacks-block-height (get end-block trade)))
     false
+  )
+)
+
+(define-public (set-user-preferences
+  (favorite-genres (list 10 (string-ascii 30)))
+  (favorite-authors (list 10 (string-ascii 50)))
+  (reading-level (string-ascii 20))
+  (preferred-conditions (list 5 (string-ascii 20)))
+  (max-price uint)
+)
+  (begin
+    (map-set user-preferences tx-sender {
+      favorite-genres: favorite-genres,
+      favorite-authors: favorite-authors,
+      reading-level: reading-level,
+      preferred-conditions: preferred-conditions,
+      max-price: max-price,
+      updated-at: stacks-block-height
+    })
+    (ok true)
+  )
+)
+
+(define-public (create-book-review
+  (book-id uint)
+  (rating uint)
+  (review-text (string-ascii 500))
+  (verified-trade bool)
+)
+  (let ((review-id (var-get next-review-id)))
+    (asserts! (is-some (map-get? books book-id)) ERR-NOT-FOUND)
+    (asserts! (and (>= rating u1) (<= rating u5)) ERR-INVALID-RATING)
+    
+    (map-set book-reviews review-id {
+      book-id: book-id,
+      reviewer: tx-sender,
+      rating: rating,
+      review-text: review-text,
+      helpful-votes: u0,
+      created-at: stacks-block-height,
+      verified-trade: verified-trade
+    })
+    
+    (var-set next-review-id (+ review-id u1))
+    (ok review-id)
+  )
+)
+
+(define-public (mark-book-read
+  (book-id uint)
+  (rating uint)
+  (trade-id uint)
+)
+  (let ((book (unwrap! (map-get? books book-id) ERR-NOT-FOUND))
+        (trade (map-get? trades trade-id)))
+    (asserts! (and (>= rating u1) (<= rating u5)) ERR-INVALID-RATING)
+    
+    (map-set reading-history {user: tx-sender, book-id: book-id} {
+      completed: true,
+      rating: rating,
+      read-date: stacks-block-height,
+      trade-id: trade-id
+    })
+    
+    (unwrap-panic (update-genre-stats (get genre book) rating))
+    (ok true)
+  )
+)
+
+(define-private (update-genre-stats (genre (string-ascii 30)) (rating uint))
+  (let ((current-stats (default-to {total-trades: u0, total-ratings: u0, average-rating: u0}
+                                  (map-get? genre-popularity genre))))
+    (let ((new-total-trades (+ (get total-trades current-stats) u1))
+          (new-total-ratings (+ (get total-ratings current-stats) rating))
+          (new-average (/ (+ (get total-ratings current-stats) rating) 
+                         (+ (get total-trades current-stats) u1))))
+      (map-set genre-popularity genre {
+        total-trades: new-total-trades,
+        total-ratings: new-total-ratings,
+        average-rating: new-average
+      })
+      (ok true)
+    )
+  )
+)
+
+(define-public (vote-review-helpful (review-id uint))
+  (let ((review (unwrap! (map-get? book-reviews review-id) ERR-NOT-FOUND)))
+    (map-set book-reviews review-id 
+      (merge review {helpful-votes: (+ (get helpful-votes review) u1)}))
+    (ok true)
+  )
+)
+
+(define-read-only (get-user-preferences (user principal))
+  (map-get? user-preferences user)
+)
+
+(define-read-only (get-book-review (review-id uint))
+  (map-get? book-reviews review-id)
+)
+
+(define-read-only (get-reading-history (user principal) (book-id uint))
+  (map-get? reading-history {user: user, book-id: book-id})
+)
+
+(define-read-only (get-genre-stats (genre (string-ascii 30)))
+  (map-get? genre-popularity genre)
+)
+
+(define-read-only (get-recommended-books (user principal))
+  (match (map-get? user-preferences user)
+    prefs (ok (list u1 u2 u3 u4 u5))
+    (ok (list))
+  )
+)
+
+(define-read-only (check-book-matches-preferences (book-id uint) (user principal))
+  (match (map-get? user-preferences user)
+    prefs 
+      (match (map-get? books book-id)
+        book (ok (and 
+               (get available book)
+               (<= (get price book) (get max-price prefs))))
+        (ok false)
+      )
+    (ok false)
   )
 )
