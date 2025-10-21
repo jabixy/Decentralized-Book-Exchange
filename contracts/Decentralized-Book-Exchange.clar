@@ -7,11 +7,15 @@
 (define-constant ERR-INSUFFICIENT-FUNDS (err u402))
 (define-constant ERR-INVALID-RATING (err u411))
 (define-constant ERR-PREFERENCE-EXISTS (err u412))
+(define-constant ERR-ALREADY-IN-WAITLIST (err u413))
+(define-constant ERR-NOT-IN-WAITLIST (err u414))
+(define-constant ERR-WAITLIST-FULL (err u415))
 
 (define-constant CONTRACT-OWNER tx-sender)
 (define-constant PLATFORM-FEE u100)
 (define-constant MIN-ESCROW-AMOUNT u1000000)
 (define-constant MAX-LENDING-PERIOD u144)
+(define-constant MAX-WAITLIST-SIZE u50)
 
 (define-data-var next-book-id uint u1)
 (define-data-var next-trade-id uint u1)
@@ -104,6 +108,21 @@
     total-ratings: uint,
     average-rating: uint
   }
+)
+
+(define-map book-waitlist-count
+  uint
+  uint
+)
+
+(define-map waitlist-entries
+  {book-id: uint, position: uint}
+  principal
+)
+
+(define-map user-waitlist-position
+  {book-id: uint, user: principal}
+  uint
 )
 
 (define-public (list-book 
@@ -485,5 +504,72 @@
         (ok false)
       )
     (ok false)
+  )
+)
+
+(define-public (join-book-waitlist (book-id uint))
+  (let (
+    (book (unwrap! (map-get? books book-id) ERR-NOT-FOUND))
+    (current-count (default-to u0 (map-get? book-waitlist-count book-id)))
+    (existing-position (map-get? user-waitlist-position {book-id: book-id, user: tx-sender}))
+  )
+    (asserts! (not (get available book)) ERR-INVALID-STATUS)
+    (asserts! (is-none existing-position) ERR-ALREADY-IN-WAITLIST)
+    (asserts! (< current-count MAX-WAITLIST-SIZE) ERR-WAITLIST-FULL)
+    (asserts! (not (is-eq tx-sender (get owner book))) ERR-UNAUTHORIZED)
+    
+    (let ((new-position (+ current-count u1)))
+      (map-set waitlist-entries {book-id: book-id, position: new-position} tx-sender)
+      (map-set user-waitlist-position {book-id: book-id, user: tx-sender} new-position)
+      (map-set book-waitlist-count book-id new-position)
+      (ok new-position)
+    )
+  )
+)
+
+(define-public (leave-book-waitlist (book-id uint))
+  (let (
+    (position (unwrap! (map-get? user-waitlist-position {book-id: book-id, user: tx-sender}) ERR-NOT-IN-WAITLIST))
+    (current-count (default-to u0 (map-get? book-waitlist-count book-id)))
+  )
+    (map-delete waitlist-entries {book-id: book-id, position: position})
+    (map-delete user-waitlist-position {book-id: book-id, user: tx-sender})
+    
+    (if (is-eq position current-count)
+      (map-set book-waitlist-count book-id (- current-count u1))
+      true
+    )
+    (ok true)
+  )
+)
+
+(define-read-only (get-waitlist-position (book-id uint) (user principal))
+  (ok (map-get? user-waitlist-position {book-id: book-id, user: user}))
+)
+
+(define-read-only (get-waitlist-count (book-id uint))
+  (ok (default-to u0 (map-get? book-waitlist-count book-id)))
+)
+
+(define-read-only (is-user-in-waitlist (book-id uint) (user principal))
+  (ok (is-some (map-get? user-waitlist-position {book-id: book-id, user: user})))
+)
+
+(define-read-only (get-next-waitlist-user (book-id uint))
+  (ok (map-get? waitlist-entries {book-id: book-id, position: u1}))
+)
+
+(define-read-only (get-waitlist-user-at-position (book-id uint) (position uint))
+  (ok (map-get? waitlist-entries {book-id: book-id, position: position}))
+)
+
+(define-public (notify-waitlist-on-availability (book-id uint))
+  (let (
+    (book (unwrap! (map-get? books book-id) ERR-NOT-FOUND))
+    (waitlist-count (default-to u0 (map-get? book-waitlist-count book-id)))
+  )
+    (asserts! (is-eq tx-sender (get owner book)) ERR-UNAUTHORIZED)
+    (asserts! (get available book) ERR-INVALID-STATUS)
+    (ok waitlist-count)
   )
 )
